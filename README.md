@@ -1,4 +1,5 @@
 # ptop — PowerShell Top for Windows
+NOTE: This was made 100% by Gemini Argon just for myself, feel free to use it if you want.
 
 A fast, flicker-free, **zero-admin** `btop`-style Terminal UI (TUI) system and GPU monitor for Windows written in a single standalone PowerShell script.
 
