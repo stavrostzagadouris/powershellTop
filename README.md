@@ -58,8 +58,8 @@ Most Windows terminal hardware monitors (`btop4win-LHM`, OpenHardwareMonitor-bas
 
 ### 1. Clone the repository
 ```bash
-git clone https://github.com/YOUR_USERNAME/ptop.git
-cd ptop
+git clone https://github.com/stavrostzagadouris/powershellTop.git
+cd powershellTop
 ```
 
 ### 2. Run directly
