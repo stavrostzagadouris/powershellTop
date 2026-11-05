@@ -322,9 +322,83 @@ function Draw-FullLine([string]$Content, [int]$InnerWidth) {
     return "$($C.Border)│$($C.Reset) $P $($C.Border)│$($C.Reset)"
 }
 
+$HasNvidiaSmi = [bool](Get-Command nvidia-smi -CommandType Application -ErrorAction SilentlyContinue)
+
+# Vendor-neutral fallback (AMD / Intel / anything WDDM): the "GPU Engine" and
+# "GPU Adapter Memory" performance counters that Task Manager uses (no admin).
+# Gives Util %, VRAM and per-process activity; no temp/power/fan/clocks.
+$GpuEngineCat   = $null
+$GpuMemCat      = $null
+$PrevGpuEngine  = $null
+$GpuAdapterName = "GPU"
+$GpuAdapterMemMB = 1.0
+if (-not $HasNvidiaSmi) {
+    try {
+        $GpuEngineCat  = [System.Diagnostics.PerformanceCounterCategory]::new('GPU Engine')
+        $GpuMemCat     = [System.Diagnostics.PerformanceCounterCategory]::new('GPU Adapter Memory')
+        $PrevGpuEngine = $GpuEngineCat.ReadCategory()['Utilization Percentage']
+    } catch { $GpuEngineCat = $null }
+
+    # Prefer a discrete AMD/NVIDIA adapter over integrated / remote-display ones
+    $vc = Get-CimInstance Win32_VideoController | Where-Object { $_.AdapterCompatibility -notmatch 'Microsoft' } |
+        Sort-Object { if ($_.AdapterCompatibility -match 'AMD|Advanced Micro|NVIDIA') { 0 } else { 1 } } |
+        Select-Object -First 1
+    if ($vc) {
+        $GpuAdapterName  = $vc.Name
+        $GpuAdapterMemMB = [Math]::Max(1.0, [double]$vc.AdapterRAM / 1MB)
+        # AdapterRAM is a uint32 (caps at 4 GiB); the driver's registry value holds the real size
+        Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}' -ErrorAction SilentlyContinue | ForEach-Object {
+            $dp = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+            $q  = $dp.'HardwareInformation.qwMemorySize'
+            if ($dp.DriverDesc -eq $vc.Name -and $q) {
+                if ($q -is [byte[]]) { $q = [BitConverter]::ToUInt64($q, 0) }
+                $GpuAdapterMemMB = [Math]::Max(1.0, [double]$q / 1MB)
+            }
+        }
+    }
+}
+
+function Get-GpuStatsGeneric($res) {
+    if (-not $GpuEngineCat) { return $res }
+    $res.Name       = $GpuAdapterName
+    $res.ShortName  = if ($GpuAdapterName -match '(RX|RTX|GTX|Arc)\s+\S+') { $Matches[0] } else { ($GpuAdapterName -replace '^(AMD|Intel\(R\)|NVIDIA)\s+', '' -replace '\s+Graphics', '').Trim() }
+    $res.PState     = ""
+    $res.HasSensors = $false
+    $res.MemTotMB   = $GpuAdapterMemMB
+
+    # Utilization counters are rates: diff this sample against the previous one
+    $cur = $GpuEngineCat.ReadCategory()['Utilization Percentage']
+    $engUtil = @{}   # "luid|engtype" -> summed %
+    $pidUtil = @{}
+    foreach ($k in $cur.Keys) {
+        $old = $script:PrevGpuEngine[$k]
+        if (-not $old -or $k -notmatch '^pid_(\d+)_(luid_\w+?_phys_\d+)_eng_\d+_engtype_(.*)$') { continue }
+        $v = [System.Diagnostics.CounterSample]::Calculate($old.Sample, $cur[$k].Sample)
+        if ($v -le 0) { continue }
+        $engUtil["$($Matches[2])|$($Matches[3])"] += $v
+        $pidUtil[[int]$Matches[1]] += $v
+    }
+    $script:PrevGpuEngine = $cur
+    foreach ($p in $pidUtil.Keys) { $res.GpuPids[$p] = [int][Math]::Min(100, [Math]::Round($pidUtil[$p])) }
+
+    # Pick the adapter with the most dedicated VRAM in use (discrete GPU), then shared (iGPU)
+    $mem = $GpuMemCat.ReadCategory()
+    $luid = $mem['Dedicated Usage'].Keys | Sort-Object { $mem['Dedicated Usage'][$_].RawValue }, { $mem['Shared Usage'][$_].RawValue } -Descending | Select-Object -First 1
+    if ($luid) {
+        $res.MemUsedMB = [double]$mem['Dedicated Usage'][$luid].RawValue / 1MB
+        # Like Task Manager: adapter util = busiest engine type (3D, Copy, VideoDecode, Compute...)
+        $busiest = 0.0
+        foreach ($ek in $engUtil.Keys) {
+            if ($ek.StartsWith("$luid|")) { $busiest = [Math]::Max($busiest, $engUtil[$ek]) }
+        }
+        $res.Util = [Math]::Min(100.0, $busiest)
+    }
+    return $res
+}
+
 function Get-GpuStats {
     $res = @{
-        Name      = "NVIDIA GPU"
+        Name      = if ($HasNvidiaSmi) { "NVIDIA GPU" } else { "No GPU detected" }
         ShortName = "GPU"
         Util      = 0.0
         MemUtil   = 0.0
@@ -338,7 +412,9 @@ function Get-GpuStats {
         ClockMem  = 0
         PState    = "P0"
         GpuPids   = @{}
+        HasSensors = $HasNvidiaSmi
     }
+    if (-not $HasNvidiaSmi) { return (Get-GpuStatsGeneric $res) }
 
     $smi = & nvidia-smi --query-gpu=name,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw,power.limit,fan.speed,clocks.current.graphics,clocks.current.memory,pstate --format=csv,noheader,nounits 2>$null
     if ($smi) {
@@ -566,7 +642,8 @@ try {
 
         # ── ROW 1: CPU (Left) & GPU (Right) ──
         $CpuBorderTitle = "─$($C.Title) CPU $($C.SubTitle)($CpuName) $($C.Border)"
-        $GpuBorderTitle = "─$($C.Title) GPU $($C.SubTitle)($($Gpu.Name) [$($Gpu.PState)]) $($C.Border)"
+        $GpuPStateTag = if ($Gpu.PState) { " [$($Gpu.PState)]" } else { "" }
+        $GpuBorderTitle = "─$($C.Title) GPU $($C.SubTitle)($($Gpu.Name)$GpuPStateTag) $($C.Border)"
         $CleanCpuT = ($CpuBorderTitle -replace '\x1b\[[0-9;]*m', '').Length
         $CleanGpuT = ($GpuBorderTitle -replace '\x1b\[[0-9;]*m', '').Length
         $TopBorder = "$($C.Border)╭" + $CpuBorderTitle + ("─" * [Math]::Max(0, $LeftW + 2 - $CleanCpuT)) + "╮╭" + $GpuBorderTitle + ("─" * [Math]::Max(0, $RightW + 2 - $CleanGpuT)) + "╮$($C.Reset)"
@@ -596,13 +673,17 @@ try {
 
         # Line 4: Swap / Page   | GPU Power Draw
         $CpuL4 = "$($C.Text)Commit/Swp $(Format-Bar $PagePct $BarW) $($C.Dim)$("{0,4:0.0}/{1:0.0}G" -f $PageUsedGB, $PageTotalGB)$($C.Reset)"
-        $GpuL4 = "$($C.Text)Power      $(Format-Bar $PwrPct ($RBarW - 4) $C.Yellow) $($C.Yellow)$("{0,5:0.0}/{1:0}W" -f $Gpu.PowerW, $Gpu.PowerCapW)$($C.Reset)"
+        $GpuL4 = if ($Gpu.HasSensors) {
+            "$($C.Text)Power      $(Format-Bar $PwrPct ($RBarW - 4) $C.Yellow) $($C.Yellow)$("{0,5:0.0}/{1:0}W" -f $Gpu.PowerW, $Gpu.PowerCapW)$($C.Reset)"
+        } else { "$($C.Text)Power      $($C.Dim)N/A$($C.Reset)" }
         [void]$Out.AppendLine((Draw-BoxLine $CpuL4 $LeftW $GpuL4 $RightW))
 
         # Line 5: Cores/Procs   | GPU Temp, Fan, Clocks, MemCtrl
         $CpuL5 = "$($C.Dim)Cores: $($C.Text)$LogicalCores $($C.Dim)([P] Per-Core)   Procs: $($C.Text)$($AllProcs.Count)"
         $TCol  = Get-TempColor $Gpu.Temp
-        $GpuL5 = "$($C.Dim)Temp: $TCol$("{0:0}°C" -f $Gpu.Temp)  $($C.Dim)Fan: $($C.Cyan)$("{0:0}%" -f $Gpu.FanPct)  $($C.Dim)Clocks: $($C.Green)$($Gpu.ClockCore)$($C.Dim)/$($C.Magenta)$($Gpu.ClockMem)MHz  $($C.Dim)MemCtrl: $($C.Text)$("{0:0}%" -f $Gpu.MemUtil)"
+        $GpuL5 = if ($Gpu.HasSensors) {
+            "$($C.Dim)Temp: $TCol$("{0:0}°C" -f $Gpu.Temp)  $($C.Dim)Fan: $($C.Cyan)$("{0:0}%" -f $Gpu.FanPct)  $($C.Dim)Clocks: $($C.Green)$($Gpu.ClockCore)$($C.Dim)/$($C.Magenta)$($Gpu.ClockMem)MHz  $($C.Dim)MemCtrl: $($C.Text)$("{0:0}%" -f $Gpu.MemUtil)"
+        } else { "$($C.Dim)Temp/Fan/Clocks: N/A (NVIDIA only)" }
         [void]$Out.AppendLine((Draw-BoxLine $CpuL5 $LeftW $GpuL5 $RightW))
 
         $ExtraLines = 0

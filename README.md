@@ -16,6 +16,7 @@ Most Windows terminal hardware monitors (`btop4win-LHM`, OpenHardwareMonitor-bas
   * **Power Draw** (`W / Cap W` + meter bar)
   * **GPU Temperature (`°C`)**, **Fan Speed (`%`)**, **Graphics & Memory Clocks (`MHz`)**, **Memory Controller %**, and **P-State**
   * **Per-Process GPU Activity:** Highlights processes actively running on the GPU (`● RTX 3080 (Active)` / SM%)
+* **AMD / Intel / Other GPUs (fallback):** When `nvidia-smi` isn't available, ptop reads the vendor-neutral Windows GPU performance counters (the same ones Task Manager uses) for **GPU %**, **VRAM**, and **per-process GPU activity**. Temperature, power, fan and clocks are NVIDIA-only.
 * **Sub-Millisecond Native CPU & RAM Polling:**
   * Uses inline C# P/Invoke (`GetSystemTimes`, `GlobalMemoryStatusEx`, and `NtQuerySystemInformation`) instead of slow WMI queries (`< 0.2ms` overhead)
   * Press **`P`** to toggle a live **Per-Core CPU Utilization Grid** across all logical processors
