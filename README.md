@@ -21,10 +21,12 @@ Most Windows terminal hardware monitors (`btop4win-LHM`, OpenHardwareMonitor-bas
   * Uses inline C# P/Invoke (`GetSystemTimes`, `GlobalMemoryStatusEx`, and `NtQuerySystemInformation`) instead of slow WMI queries (`< 0.2ms` overhead)
   * Press **`P`** to toggle a live **Per-Core CPU Utilization Grid** across all logical processors
 * **Disks & Live Network Throughput:**
-  * Color-graded capacity bars for fixed drives
+  * Color-graded capacity bars for fixed drives, with live per-drive **Read (`R`)** / **Write (`W`)** throughput
   * Real-time **Download (`▼`)** and **Upload (`▲`)** throughput (`KB/s` / `MB/s`) plus session totals
+* **Battery Status (laptops):** Charge % plus charging / time remaining in the header (hidden on desktops)
 * **Interactive Process Manager:**
   * Sort by **CPU (`C`)**, **Memory (`M`)**, or **Active GPU Processes (`G`)**
+  * Press **`/`** to filter processes by name or PID
   * Navigate rows with **`↑` / `↓`** and terminate processes directly with **`K`** or **`Del`**
 * **5 Built-in 24-bit TrueColor Themes:**
   * Cycle live with **`T`**: **Midnight**, **Cyberpunk**, **Matrix**, **Gruvbox**, and **Nord**
@@ -95,8 +97,9 @@ ptop
 | **`T`** | Cycle **Color Themes** (*Midnight → Cyberpunk → Matrix → Gruvbox → Nord*) |
 | **`↑` / `↓`** | Move process selection highlight up / down |
 | **`K` / `Del`** | Terminate (kill) the currently highlighted process |
+| **`/`** | Filter processes by name or PID (`Enter` keeps the filter, `Esc` clears it) |
 | **`+` / `-`** | Speed up / slow down the refresh interval (`250ms` – `5000ms`) |
-| **`Q` / `Esc`** | Quit `ptop` and restore the terminal screen |
+| **`Q` / `Esc` / `Ctrl+C`** | Quit `ptop` and restore the terminal screen (`Esc` clears an active filter first) |
 
 ---
 
@@ -114,7 +117,9 @@ ptop -RefreshMs 500
 
 1. **CPU Total & Per-Core Metrics:** Compiled at runtime via `Add-Type` C# P/Invoke against `kernel32.dll!GetSystemTimes` and `ntdll.dll!NtQuerySystemInformation(SystemProcessorPerformanceInformation)`. This completely bypasses WMI/CIM performance counter lag and requires zero elevation.
 2. **Physical & Virtual Memory:** Queries `kernel32.dll!GlobalMemoryStatusEx` directly in memory.
-3. **GPU Card & Process Telemetry:** Queries user-space NVML via `nvidia-smi` for card-level utilization, VRAM, power, thermals, clocks, and `nvidia-smi pmon` for active WDDM/TCC GPU processes.
+3. **GPU Card & Process Telemetry:** Queries user-space NVML via `nvidia-smi` for card-level utilization, VRAM, power, thermals, clocks, and `nvidia-smi pmon` for active WDDM/TCC GPU processes. Without `nvidia-smi`, falls back to the Windows `GPU Engine` / `GPU Adapter Memory` performance counters.
+4. **Disk I/O:** Reads the `LogicalDisk` performance counters (`Disk Read/Write Bytes/sec`) directly through .NET, which is fast and needs no admin.
+5. **Battery:** Queries `kernel32.dll!GetSystemPowerStatus`.
 
 ---
 

@@ -11,7 +11,8 @@
     Author  : Built with Argo (Gemini 4 Argon)
     License : MIT
     Controls:
-      [Q] / [Esc] : Quit
+      [Q] / [Esc] : Quit (Esc clears an active filter first; Ctrl+C also quits)
+      [/]         : Filter processes by name or PID (Enter keeps, Esc clears)
       [Up]/[Down] : Select process in table
       [K] / [Del] : Kill selected process
       [P]         : Toggle Per-Core CPU bars view
@@ -156,12 +157,41 @@ public static class PTopNative {
     Add-Type -TypeDefinition $NativeCode -Language CSharp
 }
 
+# Battery status (separate type so sessions that already loaded PTopNative still get it)
+if (-not ('PTopPower' -as [type])) {
+    $PowerCode = @"
+using System.Runtime.InteropServices;
+
+public static class PTopPower {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SYSTEM_POWER_STATUS {
+        public byte ACLineStatus;
+        public byte BatteryFlag;
+        public byte BatteryLifePercent;
+        public byte SystemStatusFlag;
+        public int BatteryLifeTime;
+        public int BatteryFullLifeTime;
+    }
+
+    [DllImport("kernel32.dll")]
+    public static extern bool GetSystemPowerStatus(out SYSTEM_POWER_STATUS status);
+
+    public static SYSTEM_POWER_STATUS GetStatus() {
+        SYSTEM_POWER_STATUS s;
+        GetSystemPowerStatus(out s);
+        return s;
+    }
+}
+"@
+    Add-Type -TypeDefinition $PowerCode -Language CSharp
+}
+
 # Prime CPU counters
 [void][PTopNative]::GetCpuUsage()
 [void][PTopNative]::GetPerCoreUsage()
 
-# Detect CPU Name once via registry
-$CpuName = (Get-ItemProperty "HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0").ProcessorNameString
+# Detect CPU Name once via registry (read the single value; Get-ItemProperty chokes on binary values in this key)
+$CpuName = [Microsoft.Win32.Registry]::GetValue("HKEY_LOCAL_MACHINE\HARDWARE\DESCRIPTION\System\CentralProcessor\0", "ProcessorNameString", $null)
 if (-not $CpuName) { $CpuName = "CPU" }
 $CpuName = $CpuName.Trim()
 $LogicalCores = [Environment]::ProcessorCount
@@ -300,6 +330,27 @@ function Format-Sparkline([System.Collections.Generic.List[double]]$History, [in
     }
     [void]$Sb.Append($C.Reset)
     return $Sb.ToString()
+}
+
+function Format-Rate([double]$Bps) {
+    $s = if ($Bps -ge 100MB) { "{0:0}M/s" -f ($Bps / 1MB) }
+         elseif ($Bps -ge 1MB) { "{0:0.0}M/s" -f ($Bps / 1MB) }
+         else { "{0:0}K/s" -f ($Bps / 1KB) }
+    return $s.PadLeft(7)
+}
+
+function Format-Battery($Ps) {
+    # BatteryFlag 128 = no system battery, 255 = unknown status
+    if ($Ps.BatteryFlag -eq 128 -or $Ps.BatteryFlag -eq 255 -or $Ps.BatteryLifePercent -gt 100) { return "" }
+    $Pct = [int]$Ps.BatteryLifePercent
+    $Col = if ($Pct -gt 50) { $C.Green } elseif ($Pct -gt 20) { $C.Yellow } else { $C.Red }
+    $State = if ($Ps.ACLineStatus -eq 1) {
+        if ($Ps.BatteryFlag -band 8) { "charging" } else { "AC" }
+    } elseif ($Ps.BatteryLifeTime -gt 0) {
+        $t = [TimeSpan]::FromSeconds($Ps.BatteryLifeTime)
+        "{0}h {1:00}m left" -f [int][Math]::Floor($t.TotalHours), $t.Minutes
+    } else { "on battery" }
+    return " $($C.Dim)│ Bat: $Col$Pct% $($C.Dim)($State)"
 }
 
 function Pad-Ansi([string]$Str, [int]$Width) {
@@ -469,6 +520,14 @@ foreach ($nic in $NetIfaces) {
     $PrevNetTx += $st.BytesSent
 }
 
+# Per-volume disk throughput from the LogicalDisk performance counters (no admin)
+$DiskIoCat  = $null
+$PrevDiskIo = $null
+try {
+    $DiskIoCat  = [System.Diagnostics.PerformanceCounterCategory]::new('LogicalDisk')
+    $PrevDiskIo = $DiskIoCat.ReadCategory()
+} catch { $DiskIoCat = $null }
+
 # Process CPU tracking state
 $PrevProcTimes = @{}
 $PrevProcStamp = [DateTime]::UtcNow
@@ -482,6 +541,12 @@ $SelectedIdx = 0      # Process row selection
 $StatusMsg   = ""
 $StatusUntil = [DateTime]::MinValue
 $DisplayedProcs = @()
+$FilterText  = ""     # Process name/PID filter, set with [/]
+$FilterMode  = $false # True while typing a filter
+$QuitRequested = $false
+
+# Read Ctrl+C as a key so a deliberate quit can be told apart from a crash
+try { [Console]::TreatControlCAsInput = $true } catch {}
 
 # Enter alternate screen buffer and hide cursor
 Write-Host "$ESC[?1049h$ESC[?25l$ESC[2J" -NoNewline
@@ -493,9 +558,24 @@ try {
         # Handle keyboard input without blocking
         while ([Console]::KeyAvailable) {
             $Key = [Console]::ReadKey($true)
+            if ($Key.Key -eq 'C' -and ($Key.Modifiers -band [ConsoleModifiers]::Control)) { $QuitRequested = $true; return }
+
+            # Typing a filter: every printable key goes into the filter text
+            if ($FilterMode) {
+                switch ($Key.Key) {
+                    'Enter'     { $FilterMode = $false }
+                    'Escape'    { $FilterMode = $false; $FilterText = "" }
+                    'Backspace' { if ($FilterText.Length) { $FilterText = $FilterText.Substring(0, $FilterText.Length - 1) } }
+                    default     { if (-not [char]::IsControl($Key.KeyChar)) { $FilterText += $Key.KeyChar } }
+                }
+                $SelectedIdx = 0
+                continue
+            }
+            if ($Key.KeyChar -eq '/') { $FilterMode = $true; $SelectedIdx = 0; continue }
+
             switch ($Key.Key) {
-                'Q'          { return }
-                'Escape'     { return }
+                'Q'          { $QuitRequested = $true; return }
+                'Escape'     { if ($FilterText) { $FilterText = ""; $SelectedIdx = 0 } else { $QuitRequested = $true; return } }
                 'C'          { $SortBy = "CPU"; $SelectedIdx = 0 }
                 'M'          { $SortBy = "MEM"; $SelectedIdx = 0 }
                 'G'          { $SortBy = "GPU"; $SelectedIdx = 0 }
@@ -588,6 +668,21 @@ try {
 
         # 4. Collect Disks
         $Drives = [System.IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq 'Fixed' -and $_.IsReady }
+        $DiskRates = @{}   # "C:" -> @(readBytesPerSec, writeBytesPerSec)
+        if ($DiskIoCat) {
+            $CurDiskIo = $DiskIoCat.ReadCategory()
+            $RdNow = $CurDiskIo['Disk Read Bytes/sec'];  $RdOld = $PrevDiskIo['Disk Read Bytes/sec']
+            $WrNow = $CurDiskIo['Disk Write Bytes/sec']; $WrOld = $PrevDiskIo['Disk Write Bytes/sec']
+            foreach ($inst in $RdNow.Keys) {
+                if ($RdOld[$inst] -and $WrOld[$inst] -and $WrNow[$inst]) {
+                    $DiskRates[$inst] = @(
+                        [System.Diagnostics.CounterSample]::Calculate($RdOld[$inst].Sample, $RdNow[$inst].Sample),
+                        [System.Diagnostics.CounterSample]::Calculate($WrOld[$inst].Sample, $WrNow[$inst].Sample)
+                    )
+                }
+            }
+            $PrevDiskIo = $CurDiskIo
+        }
 
         # 5. Collect Processes
         $NowProc = [DateTime]::UtcNow
@@ -633,10 +728,16 @@ try {
         $UpSpan = [TimeSpan]::FromMilliseconds([Environment]::TickCount64)
         $UpStr = "{0}d {1:00}h {2:00}m" -f $UpSpan.Days, $UpSpan.Hours, $UpSpan.Minutes
         $BannerStatus = if ([DateTime]::UtcNow -lt $StatusUntil) { " │ $($C.Orange)$StatusMsg" } else { "" }
-        $HdrLeft = "$($C.Title) ptop $($C.Dim)│ $($C.Cyan)$($env:COMPUTERNAME) $($C.Dim)│ Up: $($C.Text)$UpStr $($C.Dim)│ $($C.Yellow)${RefreshMs}ms$BannerStatus"
+        $BatStr = Format-Battery ([PTopPower]::GetStatus())
+        $HdrLeft = "$($C.Title) ptop $($C.Dim)│ $($C.Cyan)$($env:COMPUTERNAME) $($C.Dim)│ Up: $($C.Text)$UpStr$BatStr $($C.Dim)│ $($C.Yellow)${RefreshMs}ms$BannerStatus"
         $HdrRight = "$($C.Dim)[$($C.Yellow)P$($C.Dim)]Cores [$($C.Yellow)T$($C.Dim)]heme [$($C.Yellow)C/M/G$($C.Dim)]Sort [$($C.Yellow)↑↓/K$($C.Dim)]Kill [$($C.Yellow)Q$($C.Dim)]uit │ $($C.Cyan)$ClockStr "
         $CleanL = ($HdrLeft -replace '\x1b\[[0-9;]*m', '').Length
         $CleanR = ($HdrRight -replace '\x1b\[[0-9;]*m', '').Length
+        # Narrow window: drop the key hints rather than wrapping the header onto a second line
+        if ($CleanL + $CleanR + 1 -gt $WinW) {
+            $HdrRight = "$($C.Cyan)$ClockStr "
+            $CleanR = $ClockStr.Length + 1
+        }
         $Gap = [Math]::Max(1, $WinW - $CleanL - $CleanR)
         [void]$Out.AppendLine("$HdrLeft" + (" " * $Gap) + "$HdrRight$($C.Reset)")
 
@@ -732,7 +833,10 @@ try {
             $useG = ($d.TotalSize - $d.AvailableFreeSpace) / 1GB
             $dPct = if ($totG -gt 0) { ($useG / $totG) * 100.0 } else { 0.0 }
             $dName = $d.Name.TrimEnd('\')
-            $DskLines.Add("$($C.Text)$($dName.PadRight(10)) $(Format-Bar $dPct ($BarW - 6)) $($C.Cyan)$("{0,4:0}/{1:0}G ({2:0}%)" -f $useG, $totG, $dPct)$($C.Reset)")
+            $io = $DiskRates[$dName]
+            $IoStr = if ($io) { " $($C.Green)R$(Format-Rate $io[0]) $($C.Yellow)W$(Format-Rate $io[1])" } else { "" }
+            $DskBarW = [Math]::Max(4, $LeftW - 38)
+            $DskLines.Add("$($C.Text)$($dName.PadRight(4))$(Format-Bar $dPct $DskBarW) $($C.Cyan)$("{0,4:0}/{1:0}G {2,3:0}%" -f $useG, $totG, $dPct)$IoStr$($C.Reset)")
         }
         while ($DskLines.Count -lt 2) { $DskLines.Add("") }
 
@@ -748,7 +852,10 @@ try {
         [void]$Out.AppendLine($BotSplit)
 
         # ── ROW 3: PROCESSES (Full Width) ──
-        $ProcTitle = "─$($C.Title) Processes $($C.SubTitle)(Sort: $($C.Yellow)$SortBy$($C.SubTitle) │ GPU Apps: $($C.Green)$($Gpu.GpuPids.Count)$($C.SubTitle) │ Theme: $($C.Cyan)$($C.Name)$($C.SubTitle)) $($C.Border)"
+        $FilterTag = if ($FilterMode) { "Filter: $($C.Yellow)$FilterText$($C.Text)_ $($C.Dim)[Enter]Keep [Esc]Clear$($C.SubTitle)" }
+                     elseif ($FilterText) { "Filter: $($C.Yellow)$FilterText $($C.Dim)[Esc]Clear$($C.SubTitle)" }
+                     else { "[$($C.Yellow)/$($C.SubTitle)]Filter" }
+        $ProcTitle = "─$($C.Title) Processes $($C.SubTitle)(Sort: $($C.Yellow)$SortBy$($C.SubTitle) │ $FilterTag │ GPU Apps: $($C.Green)$($Gpu.GpuPids.Count)$($C.SubTitle) │ Theme: $($C.Cyan)$($C.Name)$($C.SubTitle)) $($C.Border)"
         $CleanPT = ($ProcTitle -replace '\x1b\[[0-9;]*m', '').Length
         [void]$Out.AppendLine("$($C.Border)╭" + $ProcTitle + ("─" * [Math]::Max(0, $FullInnerW + 2 - $CleanPT)) + "╮$($C.Reset)")
 
@@ -757,7 +864,12 @@ try {
         $TblHdr = "{0,7}  {1,-$NameColW}  {2,7}  {3,9}  {4,6}  {5,-16}" -f "PID", "PROCESS NAME", "CPU %", "MEM (MB)", "MEM %", "GPU STATUS"
         [void]$Out.AppendLine((Draw-FullLine "$($C.HeaderBg)$($TblHdr.PadRight($FullInnerW))$($C.Reset)" $FullInnerW))
 
-        # Sort Processes
+        # Filter (name substring, or PID prefix) then sort
+        if ($FilterText) {
+            $ProcList = @($ProcList | Where-Object {
+                $_.Name.IndexOf($FilterText, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or "$($_.PID)".StartsWith($FilterText)
+            })
+        }
         $SortedProcs = switch ($SortBy) {
             "MEM" { $ProcList | Sort-Object MemMB -Descending }
             "GPU" { $ProcList | Sort-Object IsGpu, GpuSm, CPU, MemMB -Descending }
@@ -793,6 +905,9 @@ try {
                 [void]$Out.AppendLine((Draw-FullLine $RowStr $FullInnerW))
             }
         }
+        if ($FilterText -and $DisplayedProcs.Count -eq 0) {
+            [void]$Out.AppendLine((Draw-FullLine "$($C.Dim)  No processes match '$FilterText'" $FullInnerW))
+        }
 
         [void]$Out.Append("$($C.Border)╰" + ("─" * ($FullInnerW + 2)) + "╯$($C.Reset)")
 
@@ -810,5 +925,16 @@ try {
     }
 }
 finally {
+    # Errors are silenced while running (no catch here on purpose: a catch would make every
+    # transient error fatal). If we got here without a quit key, the last error is what killed us.
+    # Grab it before the cleanup below can add errors of its own.
+    $CrashError = if (-not $QuitRequested -and $Error.Count -gt 0) { $Error[0] }
     Write-Host "$ESC[?25h$ESC[?1049l$ESC[0m" -NoNewline
+    try { [Console]::TreatControlCAsInput = $false } catch {}
+    if ($CrashError) {
+        Write-Host "ptop crashed: $($CrashError.Exception.Message)" -ForegroundColor Red
+        Write-Host "  at line $($CrashError.InvocationInfo.ScriptLineNumber): $($CrashError.InvocationInfo.Line.Trim())" -ForegroundColor DarkGray
+        Write-Host "Press any key to close..." -ForegroundColor DarkGray
+        try { [void][Console]::ReadKey($true) } catch {}
+    }
 }
