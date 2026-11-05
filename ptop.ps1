@@ -401,7 +401,7 @@ foreach ($p in [System.Diagnostics.Process]::GetProcesses()) {
 }
 
 $SortBy = "CPU"       # CPU, MEM, GPU
-$ShowPerCore = $false # Toggle with [P]
+$ShowPerCore = $true  # Toggle with [P] (default: on)
 $SelectedIdx = 0      # Process row selection
 $StatusMsg   = ""
 $StatusUntil = [DateTime]::MinValue
@@ -590,13 +590,13 @@ try {
         # Line 3: RAM Usage     | GPU VRAM Usage
         $VramGBUsed = $Gpu.MemUsedMB / 1024.0
         $VramGBTot  = $Gpu.MemTotMB / 1024.0
-        $CpuL3 = "$($C.Text)RAM        $(Format-Bar $RamPct $BarW) $($C.Cyan)$("{0,4:0.1}/{1:0.0}G" -f $RamUsedGB, $RamTotalGB)$($C.Reset)"
-        $GpuL3 = "$($C.Text)VRAM       $(Format-Bar $VramPct ($RBarW - 4)) $($C.Magenta)$("{0,4:0.1}/{1:0.0}G" -f $VramGBUsed, $VramGBTot) ($("{0:0}%" -f $VramPct))$($C.Reset)"
+        $CpuL3 = "$($C.Text)RAM        $(Format-Bar $RamPct $BarW) $($C.Cyan)$("{0,4:0.0}/{1:0.0}G" -f $RamUsedGB, $RamTotalGB)$($C.Reset)"
+        $GpuL3 = "$($C.Text)VRAM       $(Format-Bar $VramPct ($RBarW - 4)) $($C.Magenta)$("{0,4:0.0}/{1:0.0}G" -f $VramGBUsed, $VramGBTot) ($("{0:0}%" -f $VramPct))$($C.Reset)"
         [void]$Out.AppendLine((Draw-BoxLine $CpuL3 $LeftW $GpuL3 $RightW))
 
         # Line 4: Swap / Page   | GPU Power Draw
-        $CpuL4 = "$($C.Text)Commit/Swp $(Format-Bar $PagePct $BarW) $($C.Dim)$("{0,4:0.1}/{1:0.0}G" -f $PageUsedGB, $PageTotalGB)$($C.Reset)"
-        $GpuL4 = "$($C.Text)Power      $(Format-Bar $PwrPct ($RBarW - 4) $C.Yellow) $($C.Yellow)$("{0,5:0.1}/{1:0}W" -f $Gpu.PowerW, $Gpu.PowerCapW)$($C.Reset)"
+        $CpuL4 = "$($C.Text)Commit/Swp $(Format-Bar $PagePct $BarW) $($C.Dim)$("{0,4:0.0}/{1:0.0}G" -f $PageUsedGB, $PageTotalGB)$($C.Reset)"
+        $GpuL4 = "$($C.Text)Power      $(Format-Bar $PwrPct ($RBarW - 4) $C.Yellow) $($C.Yellow)$("{0,5:0.0}/{1:0}W" -f $Gpu.PowerW, $Gpu.PowerCapW)$($C.Reset)"
         [void]$Out.AppendLine((Draw-BoxLine $CpuL4 $LeftW $GpuL4 $RightW))
 
         # Line 5: Cores/Procs   | GPU Temp, Fan, Clocks, MemCtrl
@@ -609,7 +609,7 @@ try {
         if ($ShowPerCore -and $CorePcts.Length -gt 0) {
             $CoreTitle = "─$($C.Title) Per-Core CPU Utilization $($C.Border)"
             $CleanCT = ($CoreTitle -replace '\x1b\[[0-9;]*m', '').Length
-            [void]$Out.AppendLine("$($C.Border)├" + $CoreTitle + ("─" * [Math]::Max(0, $LeftW + 2 - $CleanCT)) + "┴" + ("─" * ($RightW + 2)) + "┤$($C.Reset)")
+            [void]$Out.AppendLine("$($C.Border)├" + $CoreTitle + ("─" * [Math]::Max(0, $LeftW + 2 - $CleanCT)) + "┴" + ("─" * ($RightW + 3)) + "┤$($C.Reset)")
             $ExtraLines++
 
             $Cols = 4
@@ -617,8 +617,8 @@ try {
             $MiniBarW = [Math]::Max(4, $CellW - 11)
             for ($i = 0; $i -lt $CorePcts.Length; $i += $Cols) {
                 $Cells = [System.Collections.Generic.List[string]]::new()
-                for ($c = 0; $c -lt $Cols; $c++) {
-                    $idx = $i + $c
+                for ($colIdx = 0; $colIdx -lt $Cols; $colIdx++) {
+                    $idx = $i + $colIdx
                     if ($idx -lt $CorePcts.Length) {
                         $cp = $CorePcts[$idx]
                         $col = Get-MeterColor $cp
@@ -651,7 +651,7 @@ try {
             $useG = ($d.TotalSize - $d.AvailableFreeSpace) / 1GB
             $dPct = if ($totG -gt 0) { ($useG / $totG) * 100.0 } else { 0.0 }
             $dName = $d.Name.TrimEnd('\')
-            $DskLines.Add("$($C.Text)$($dName.PadRight(10)) $(Format-Bar $dPct ($BarW - 4)) $($C.Cyan)$("{0,4:0}/{1:0}G ({2:0}%)" -f $useG, $totG, $dPct)$($C.Reset)")
+            $DskLines.Add("$($C.Text)$($dName.PadRight(10)) $(Format-Bar $dPct ($BarW - 6)) $($C.Cyan)$("{0,4:0}/{1:0}G ({2:0}%)" -f $useG, $totG, $dPct)$($C.Reset)")
         }
         while ($DskLines.Count -lt 2) { $DskLines.Add("") }
 
@@ -672,8 +672,8 @@ try {
         [void]$Out.AppendLine("$($C.Border)╭" + $ProcTitle + ("─" * [Math]::Max(0, $FullInnerW + 2 - $CleanPT)) + "╮$($C.Reset)")
 
         # Table Header
-        $NameColW = [Math]::Max(18, $FullInnerW - 56)
-        $TblHdr = "{0,7}  {1,-$NameColW}  {2,7}  {3,9}  {4,6}  {5,-14}" -f "PID", "PROCESS NAME", "CPU %", "MEM (MB)", "MEM %", "GPU STATUS"
+        $NameColW = [Math]::Max(18, $FullInnerW - 58)
+        $TblHdr = "{0,7}  {1,-$NameColW}  {2,7}  {3,9}  {4,6}  {5,-16}" -f "PID", "PROCESS NAME", "CPU %", "MEM (MB)", "MEM %", "GPU STATUS"
         [void]$Out.AppendLine((Draw-FullLine "$($C.HeaderBg)$($TblHdr.PadRight($FullInnerW))$($C.Reset)" $FullInnerW))
 
         # Sort Processes
@@ -697,7 +697,7 @@ try {
                 $gText = if ($pr.IsGpu) {
                     if ($pr.GpuSm -gt 0) { "● $($Gpu.ShortName) ($($pr.GpuSm)%)" } else { "● $($Gpu.ShortName) (Active)" }
                 } else { "·" }
-                $PlainRow = "{0,7}  {1,-$NameColW}  {2,6:0.1}%  {3,8:0.1}M  {4,5:0.1}%  {5,-18}" -f $pr.PID, $pName, $pr.CPU, $pr.MemMB, $pr.MemP, $gText
+                $PlainRow = "{0,7}  {1,-$NameColW}  {2,6:0.0}%  {3,8:0.0}M  {4,5:0.0}%  {5,-19}" -f $pr.PID, $pName, $pr.CPU, $pr.MemMB, $pr.MemP, $gText
                 [void]$Out.AppendLine((Draw-FullLine "$($C.SelBg)$($PlainRow.PadRight($FullInnerW))$($C.Reset)" $FullInnerW))
             } else {
                 $cCol  = Get-MeterColor ($pr.CPU * 2)
@@ -708,7 +708,7 @@ try {
                 } else {
                     "$($C.Dim)·$($C.Reset)"
                 }
-                $RowStr = "$($C.Dim)$("{0,7}" -f $pr.PID)  $($C.Text)$($pName.PadRight($NameColW))  $cCol$("{0,6:0.1}%" -f $pr.CPU)  $($C.Cyan)$("{0,8:0.1}M" -f $pr.MemMB)  $mCol$("{0,5:0.1}%" -f $pr.MemP)  $gBadge"
+                $RowStr = "$($C.Dim)$("{0,7}" -f $pr.PID)  $($C.Text)$($pName.PadRight($NameColW))  $cCol$("{0,6:0.0}%" -f $pr.CPU)  $($C.Cyan)$("{0,8:0.0}M" -f $pr.MemMB)  $mCol$("{0,5:0.0}%" -f $pr.MemP)  $gBadge"
                 [void]$Out.AppendLine((Draw-FullLine $RowStr $FullInnerW))
             }
         }
