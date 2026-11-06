@@ -1,6 +1,8 @@
 # ptop — PowerShell Top for Windows
 NOTE: This was made 100% by Gemini Argon just for myself, feel free to use it if you want.
 
+> 🐧 **On Linux?** Check out **[shtop](https://github.com/stavrostzagadouris/shelltop)**, the Linux version of ptop. It has the same look, themes and keys, in a single dependency-free Python 3 script that needs no root.
+
 A fast, flicker-free, **zero-admin** `btop`-style Terminal UI (TUI) system and GPU monitor for Windows written in a single standalone PowerShell script.
 
 Most Windows terminal hardware monitors (`btop4win-LHM`, OpenHardwareMonitor-based tools) require Administrator privileges to load kernel drivers just to read GPU utilization, or fail to display overall GPU compute usage due to Windows WDDM driver quirks (`bottom`). **`ptop`** runs entirely in standard user space with zero external dependencies and sub-millisecond native system polling.
